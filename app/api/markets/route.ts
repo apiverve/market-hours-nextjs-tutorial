@@ -17,17 +17,30 @@ export type Market = {
   holidayName?: string | null;
 };
 
-/** GET /api/markets: today's session for every exchange on the board, in one cached answer. */
+/**
+ * GET /api/markets: today's session for every exchange on the board.
+ * Each exchange is cached on its own. The free plan allows 5 calls a minute, so a cold board may come
+ * back with only some exchanges; the page asks again a minute later for the rest.
+ */
 export async function GET(request: Request) {
-  const hit = fromCache('markets', TTL_MS);
-  if (hit) return Response.json(hit);
+  const cached = EXCHANGES.map((exchange) => fromCache<Market>(`market:${exchange}`, TTL_MS));
+  if (cached.every(Boolean)) return Response.json(cached);
 
   const blocked = guard(request);
   if (blocked) return blocked;
 
   return respond(async () => {
-    const data = await Promise.all(EXCHANGES.map((exchange) => callApi<Market>('stockmarketopentimes', { query: { exchange } })));
-    toCache('markets', data);
-    return data;
+    const results = await Promise.allSettled(
+      EXCHANGES.map(async (exchange, i) => {
+        if (cached[i]) return cached[i];
+        const market = await callApi<Market>('stockmarketopentimes', { query: { exchange } });
+        toCache(`market:${exchange}`, market);
+        return market;
+      })
+    );
+    const markets = results.flatMap((r) => (r.status === 'fulfilled' ? [r.value] : []));
+    // Nothing at all came back: pass the first error on (e.g. the rate limit).
+    if (!markets.length) throw (results[0] as PromiseRejectedResult).reason;
+    return markets;
   });
 }

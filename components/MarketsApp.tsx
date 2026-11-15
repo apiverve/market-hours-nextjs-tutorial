@@ -18,6 +18,7 @@ const ZONES: Record<string, { tz: string; city: string; flag: string }> = {
   TSE: { tz: 'Asia/Tokyo', city: 'Tokyo', flag: 'JP' },
   ASX: { tz: 'Australia/Sydney', city: 'Sydney', flag: 'AU' }
 };
+const BOARD_SIZE = Object.keys(ZONES).length; // the route asks for exactly these exchanges
 
 /** How far a time zone is ahead of UTC at a given instant, in ms. */
 function offsetMs(tz: string, at: number) {
@@ -50,15 +51,27 @@ export default function MarketsApp() {
   const [now, setNow] = useState(() => Date.now());
 
   useEffect(() => {
-    fetch('/api/markets')
-      .then(async (r) => {
-        const body = await r.json();
-        if (!r.ok) throw Object.assign(new Error(body.error), { code: body.code });
-        setMarkets(body);
-      })
-      .catch((e) => setError({ message: e.message, code: e.code }));
+    let retry: ReturnType<typeof setTimeout>;
+    const load = () =>
+      fetch('/api/markets')
+        .then(async (r) => {
+          const body = await r.json();
+          if (!r.ok) throw Object.assign(new Error(body.error), { code: body.code, status: r.status });
+          setError(null);
+          setMarkets(body);
+          // The free plan allows 5 calls a minute, so a few exchanges may still be missing: fetch them in a minute.
+          if (body.length < BOARD_SIZE) retry = setTimeout(load, 65_000);
+        })
+        .catch((e) => {
+          setError({ message: e.message, code: e.code });
+          if (e.status === 429) retry = setTimeout(load, 65_000);
+        });
+    load();
     const id = setInterval(() => setNow(Date.now()), 30_000);
-    return () => clearInterval(id);
+    return () => {
+      clearInterval(id);
+      clearTimeout(retry);
+    };
   }, []);
 
   if (error?.code === 'missing_key') return <MissingKey />;
@@ -76,6 +89,7 @@ export default function MarketsApp() {
     return { m, z, open, close, closedToday, isOpen };
   });
   const openCount = rows.filter((r) => r.isOpen).length;
+  const waiting = markets ? BOARD_SIZE - markets.length : 0;
 
   return (
     <main className="app">
@@ -88,6 +102,12 @@ export default function MarketsApp() {
       </header>
 
       {error && <p className="error">{error.message}</p>}
+      {waiting > 0 && (
+        <p className="waiting">
+          {waiting} more {waiting === 1 ? 'exchange loads' : 'exchanges load'} in a minute: the free plan allows 5 API calls a minute.{' '}
+          <a href={`https://apiverve.com/pricing?${UTM}`}>See pricing</a>
+        </p>
+      )}
 
       <section className="board">
         {rows.map(({ m, z, open, close, closedToday, isOpen }) => {
